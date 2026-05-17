@@ -51,6 +51,7 @@ POST /recommend-menu
 
 Generate daily menu recommendation.
 
+```text
 Request Body
 {
 "energy_kcal": 1600,
@@ -61,6 +62,9 @@ Request Body
 "sodium_mg_max": 2000,
 "fiber_g_min": 25
 }
+```
+
+```text
 Response Example
 {
 "status": "success",
@@ -120,3 +124,4 @@ Response Example
 }
 ]
 }
+```
