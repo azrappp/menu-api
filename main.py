@@ -138,6 +138,8 @@ def adjust_portion_plan_for_disease(base_plan: Dict[str, float], diet_type: str)
 
     if "DM" in diet_type:
         plan["G"] = 0
+        if "M" in plan:
+            plan["M"] = min(plan["M"], 2)
 
     if "OBESITY" in diet_type:
         plan["G"] = 0
@@ -172,6 +174,71 @@ def get_disease_constraints(request: MenuRequest) -> Dict[str, Any]:
         constraints["sodium_max_mg"] = request.sodium_mg_max
 
     return constraints
+
+def build_debug_info(
+    milp_df: pd.DataFrame,
+    adjusted_plan: Dict[str, float],
+    constraints: Dict[str, Any],
+    solver_status: str,
+) -> Dict[str, Any]:
+
+    category_counts = (
+        milp_df
+        .groupby("category_code")
+        .size()
+        .to_dict()
+    )
+
+    category_stats = []
+
+    for category, target_portion in adjusted_plan.items():
+        cat_df = milp_df[milp_df["category_code"] == category].copy()
+
+        if cat_df.empty:
+            category_stats.append({
+                "category_code": category,
+                "target_portion": target_portion,
+                "available_foods": 0,
+                "min_energy_per_portion": None,
+                "max_energy_per_portion": None,
+                "min_fat_per_portion": None,
+                "max_fat_per_portion": None,
+                "min_carb_per_portion": None,
+                "max_carb_per_portion": None,
+                "min_fiber_per_portion": None,
+                "max_fiber_per_portion": None,
+            })
+            continue
+
+        category_stats.append({
+            "category_code": category,
+            "target_portion": target_portion,
+            "available_foods": int(len(cat_df)),
+            "min_energy_per_portion": float(cat_df["energy_kcal_per_portion"].min()),
+            "max_energy_per_portion": float(cat_df["energy_kcal_per_portion"].max()),
+            "min_fat_per_portion": float(cat_df["fat_g_per_portion"].min()),
+            "max_fat_per_portion": float(cat_df["fat_g_per_portion"].max()),
+            "min_carb_per_portion": float(cat_df["carb_g_per_portion"].min()),
+            "max_carb_per_portion": float(cat_df["carb_g_per_portion"].max()),
+            "min_fiber_per_portion": float(cat_df["fiber_g_per_portion"].min()),
+            "max_fiber_per_portion": float(cat_df["fiber_g_per_portion"].max()),
+        })
+
+    return {
+        "message": "MILP failed to find a feasible menu.",
+        "solver_status": solver_status,
+        "possible_reason": [
+            "The selected diet_type constraints may conflict with the portion plan.",
+            "Fiber minimum may be too high for the available food candidates.",
+            "Oil/fat portion may be too high if obesity adjustment is not applied.",
+            "Fruit/LH/oil variety constraints may make the solution too restrictive.",
+            "Some required categories may have too few valid candidate foods."
+        ],
+        "constraints": constraints,
+        "adjusted_portion_plan": adjusted_plan,
+        "category_counts": category_counts,
+        "category_stats": category_stats,
+    }
 
 
 def prepare_milp_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -208,6 +275,21 @@ def prepare_milp_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return milp_df
 
+def get_max_portion_for_category(
+    category_code: str,
+    adjusted_plan: Dict[str, float]
+) -> float:
+    if category_code == "M":
+        return max(2.0, adjusted_plan.get("M", 2.0))
+
+    if category_code == "G":
+        return max(2.0, adjusted_plan.get("G", 2.0))
+
+    if category_code == "SS":
+        return max(2.0, adjusted_plan.get("SS", 1.0))
+
+    return MAX_PORTION_PER_FOOD
+
 
 def solve_milp_menu(
     milp_df: pd.DataFrame,
@@ -217,17 +299,37 @@ def solve_milp_menu(
 
     model = pulp.LpProblem("Menu_Recommendation", pulp.LpMinimize)
 
-    x = {
-        i: pulp.LpVariable(
+    x = {}
+
+    for i in milp_df.index:
+        category_code = str(milp_df.loc[i, "category_code"])
+
+        max_portion_for_food = get_max_portion_for_category(
+            category_code,
+            adjusted_plan
+        )
+
+        x[i] = pulp.LpVariable(
             f"x_{i}",
             lowBound=0,
-            upBound=int(MAX_PORTION_PER_FOOD / PORTION_STEP),
+            upBound=int(max_portion_for_food / PORTION_STEP),
             cat="Integer"
         )
+
+    portion = {
+        i: x[i] * PORTION_STEP
         for i in milp_df.index
     }
+    def get_max_x_for_index(i: int) -> int:
+        category_code = str(milp_df.loc[i, "category_code"])
 
-    portion = {i: x[i] * PORTION_STEP for i in milp_df.index}
+        max_portion_for_food = get_max_portion_for_category(
+        category_code,
+        adjusted_plan
+        )
+
+        return int(max_portion_for_food / PORTION_STEP)
+
 
     total_energy = pulp.lpSum(
         portion[i] * milp_df.loc[i, "energy_kcal_per_portion"]
@@ -258,7 +360,6 @@ def solve_milp_menu(
         portion[i] * milp_df.loc[i, "fiber_g_per_portion"]
         for i in milp_df.index
     )
-
     # --------------------------------------------------------
     # Portion structure
     # Hard: M, G, SS
@@ -328,14 +429,13 @@ def solve_milp_menu(
     # Variety constraints
     # --------------------------------------------------------
 
-    max_x_value = int(MAX_PORTION_PER_FOOD / PORTION_STEP)
 
     # Max 1 fruit type per day
     fruit_indices = milp_df[milp_df["category_code"] == "B"].index.tolist()
     fruit_used = {i: pulp.LpVariable(f"fruit_used_{i}", cat="Binary") for i in fruit_indices}
 
     for i in fruit_indices:
-        model += x[i] <= max_x_value * fruit_used[i]
+        model += x[i] <= get_max_x_for_index(i) * fruit_used[i]
 
     if fruit_indices:
         model += pulp.lpSum(fruit_used[i] for i in fruit_indices) <= 1, "max_one_fruit_type_per_day"
@@ -345,7 +445,7 @@ def solve_milp_menu(
     lh_used = {i: pulp.LpVariable(f"lh_used_{i}", cat="Binary") for i in lh_indices}
 
     for i in lh_indices:
-        model += x[i] <= max_x_value * lh_used[i]
+        model += x[i] <= get_max_x_for_index(i) * lh_used[i]
 
     if lh_indices:
         model += pulp.lpSum(lh_used[i] for i in lh_indices) <= 2, "max_two_lh_types_per_day"
@@ -355,10 +455,10 @@ def solve_milp_menu(
     oil_used = {i: pulp.LpVariable(f"oil_used_{i}", cat="Binary") for i in oil_indices}
 
     for i in oil_indices:
-        model += x[i] <= max_x_value * oil_used[i]
+        model += x[i] <= get_max_x_for_index(i) * oil_used[i]
 
-    if oil_indices:
-        model += pulp.lpSum(oil_used[i] for i in oil_indices) <= 1, "max_one_oil_type_per_day"
+    for i in oil_indices:
+        model += x[i] <= get_max_x_for_index(i) * oil_used[i]
 
     # --------------------------------------------------------
     # Objective
@@ -389,9 +489,16 @@ def solve_milp_menu(
     status = pulp.LpStatus[model.status]
 
     if status != "Optimal":
+        debug_info = build_debug_info(
+        milp_df=milp_df,
+        adjusted_plan=adjusted_plan,
+        constraints=constraints,
+        solver_status=status,
+        )
+
         raise HTTPException(
-            status_code=422,
-            detail=f"MILP failed. Solver status: {status}"
+        status_code=422,
+        detail=debug_info
         )
 
     selected_items = []
