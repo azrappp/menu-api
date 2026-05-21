@@ -741,6 +741,9 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
             "lunch": 0.5,
             "dinner": 0.5,
         },
+         "SS": {
+        "morning_snack": 1.0,
+    },
     }
 
     step_size = {
@@ -750,6 +753,7 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
     "S": 1.0,
     "B": 1.0,
     "M": 0.5,
+    "SS": 1.0,
 }
     meal_rows = []
 
