@@ -274,11 +274,35 @@ def prepare_milp_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             milp_df[col] = pd.to_numeric(milp_df[col], errors="coerce").fillna(0)
 
     return milp_df
-
 def get_max_portion_for_category(
     category_code: str,
     adjusted_plan: Dict[str, float]
 ) -> float:
+    category_code = str(category_code)
+
+    # MP is limited to 1 type, so the selected MP must be allowed
+    # to cover the daily MP portion target.
+    if category_code == "MP":
+        return max(2.0, adjusted_plan.get("MP", 2.0))
+
+    # Vegetables are limited to max 2 types, but portion can be larger.
+    if category_code == "S":
+        return max(2.0, adjusted_plan.get("S", 2.0))
+
+    # Fruit max 2 types. Usually target is 2, but allow target-based max.
+    if category_code == "B":
+        return max(2.0, adjusted_plan.get("B", 2.0))
+
+    # LH max 2 types. If target LH = 3, one item may need 1.5 or 2 portions.
+    if category_code == "LH":
+        return max(2.0, adjusted_plan.get("LH", 2.0))
+
+    # LN max 2 types. Your debug shows LN has only 1 candidate,
+    # so it must be allowed to reach LN target.
+    if category_code == "LN":
+        return max(2.0, adjusted_plan.get("LN", 2.0))
+
+    # Oil/fat may follow adjusted plan.
     if category_code == "M":
         return max(2.0, adjusted_plan.get("M", 2.0))
 
@@ -428,8 +452,34 @@ def solve_milp_menu(
     # --------------------------------------------------------
     # Variety constraints
     # --------------------------------------------------------
+    
+    veg_indices = milp_df[milp_df["category_code"] == "S"].index.tolist()
+    veg_used = {
+    i: pulp.LpVariable(f"veg_used_{i}", cat="Binary")
+    for i in veg_indices
+    }
 
+    for i in veg_indices:
+        model += x[i] <= get_max_x_for_index(i) * veg_used[i]
 
+    if veg_indices:
+            model += (pulp.lpSum(veg_used[i] for i in veg_indices) <= 2, "max_two_vegetable_types_per_day"
+    )
+    # Max 1 MP type per day
+    mp_indices = milp_df[milp_df["category_code"] == "MP"].index.tolist()
+    mp_used = {
+    i: pulp.LpVariable(f"mp_used_{i}", cat="Binary")
+    for i in mp_indices
+    }
+
+    for i in mp_indices:
+        model += x[i] <= get_max_x_for_index(i) * mp_used[i]
+
+    if mp_indices:
+        model += (
+        pulp.lpSum(mp_used[i] for i in mp_indices) <= 1,
+        "max_one_mp_type_per_day"
+    )
     # Max 1 fruit type per day
     fruit_indices = milp_df[milp_df["category_code"] == "B"].index.tolist()
     fruit_used = {i: pulp.LpVariable(f"fruit_used_{i}", cat="Binary") for i in fruit_indices}
@@ -438,7 +488,7 @@ def solve_milp_menu(
         model += x[i] <= get_max_x_for_index(i) * fruit_used[i]
 
     if fruit_indices:
-        model += pulp.lpSum(fruit_used[i] for i in fruit_indices) <= 1, "max_one_fruit_type_per_day"
+        model += pulp.lpSum(fruit_used[i] for i in fruit_indices) <= 2, "max_one_fruit_type_per_day"
 
     # Max 2 LH types per day
     lh_indices = milp_df[milp_df["category_code"] == "LH"].index.tolist()
@@ -454,8 +504,6 @@ def solve_milp_menu(
     oil_indices = milp_df[milp_df["category_code"] == "M"].index.tolist()
     oil_used = {i: pulp.LpVariable(f"oil_used_{i}", cat="Binary") for i in oil_indices}
 
-    for i in oil_indices:
-        model += x[i] <= get_max_x_for_index(i) * oil_used[i]
 
     for i in oil_indices:
         model += x[i] <= get_max_x_for_index(i) * oil_used[i]
@@ -563,40 +611,112 @@ def split_preserve_total(total_portion: float, ratios: Dict[str, float], step: f
         idx += 1
 
     return rounded
-
-
 def assign_lh_items(lh_df: pd.DataFrame) -> List[pd.Series]:
     meal_rows = []
-    meal_cycle = ["lunch", "dinner"]
-    meal_index = 0
+
+    if lh_df.empty:
+        return meal_rows
+
+    lh_df = lh_df.copy().reset_index(drop=True)
+
+    def make_meal_row(row, meal_name, portion_to_assign):
+        meal_row = row.copy()
+        meal_row["meal_time"] = meal_name
+        meal_row["meal_portion"] = portion_to_assign
+        meal_row["meal_gram"] = portion_to_assign * row["gram_per_portion"]
+        meal_row["meal_urt_qty"] = portion_to_assign * row["urt_qty"]
+        meal_row["meal_urt"] = f"{meal_row['meal_urt_qty']} {row['urt_unit']}"
+
+        for col in NUTRIENT_COLS:
+            if col in row.index:
+                meal_col = col.replace("_per_portion", "")
+                meal_row[meal_col] = portion_to_assign * row[col]
+
+        return meal_row
+
+    # Flatten LH into 0.5-step units first
+    lh_units = []
 
     for _, row in lh_df.iterrows():
-        remaining = row["selected_portions"]
+        remaining = float(row["selected_portions"])
 
-        while remaining > 0:
-            portion_to_assign = min(remaining, 1.0)
-            meal_name = meal_cycle[meal_index % len(meal_cycle)]
+        while remaining >= 0.5 - 1e-9:
+            lh_units.append(row.copy())
+            remaining = round(remaining - 0.5, 10)
 
-            meal_row = row.copy()
-            meal_row["meal_time"] = meal_name
-            meal_row["meal_portion"] = portion_to_assign
-            meal_row["meal_gram"] = portion_to_assign * row["gram_per_portion"]
-            meal_row["meal_urt_qty"] = portion_to_assign * row["urt_qty"]
-            meal_row["meal_urt"] = f"{meal_row['meal_urt_qty']} {row['urt_unit']}"
+    # Total 0.5 units
+    total_half_units = len(lh_units)
+
+    # Target meals in priority order
+    target_meals = ["breakfast", "lunch", "dinner"]
+
+    # Case: exactly 3 portions = 6 half-units
+    # Allocate 2 half-units = 1 portion to each meal.
+    if total_half_units >= 6:
+        unit_index = 0
+
+        for meal_name in target_meals:
+            row = lh_units[unit_index]
+            meal_rows.append(make_meal_row(row, meal_name, 1.0))
+            unit_index += 2
+
+        # Any remaining units are added to lunch, not dinner as 0.5 alone
+        remaining_units = total_half_units - 6
+
+        if remaining_units > 0:
+            extra_portion = remaining_units * 0.5
+
+            # Add extra to lunch row
+            lunch_row = meal_rows[1]
+            row = lh_units[unit_index]
+
+            lunch_row["meal_portion"] += extra_portion
+            lunch_row["meal_gram"] += extra_portion * row["gram_per_portion"]
+            lunch_row["meal_urt_qty"] += extra_portion * row["urt_qty"]
+            lunch_row["meal_urt"] = f"{lunch_row['meal_urt_qty']} {row['urt_unit']}"
 
             for col in NUTRIENT_COLS:
                 if col in row.index:
                     meal_col = col.replace("_per_portion", "")
-                    meal_row[meal_col] = portion_to_assign * row[col]
+                    lunch_row[meal_col] += extra_portion * row[col]
 
-            meal_rows.append(meal_row)
+        return meal_rows
 
-            remaining -= portion_to_assign
-            meal_index += 1
+    # Case: total LH = 2.5 portions
+    if total_half_units == 5:
+        row1 = lh_units[0]
+        row2 = lh_units[2]
+
+        meal_rows.append(make_meal_row(row1, "breakfast", 1.0))
+        meal_rows.append(make_meal_row(row2, "lunch", 1.5))
+
+        return meal_rows
+
+    # Case: total LH = 2 portions
+    if total_half_units == 4:
+        row1 = lh_units[0]
+        row2 = lh_units[2]
+
+        meal_rows.append(make_meal_row(row1, "breakfast", 1.0))
+        meal_rows.append(make_meal_row(row2, "lunch", 1.0))
+
+        return meal_rows
+
+    # Case: total LH = 1.5 portions
+    if total_half_units == 3:
+        row1 = lh_units[0]
+        meal_rows.append(make_meal_row(row1, "breakfast", 1.5))
+
+        return meal_rows
+
+    # Case: total LH = 1 portion
+    if total_half_units == 2:
+        row1 = lh_units[0]
+        meal_rows.append(make_meal_row(row1, "breakfast", 1.0))
+
+        return meal_rows
 
     return meal_rows
-
-
 def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
     meal_rules = {
         "MP": {
@@ -624,14 +744,13 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
     }
 
     step_size = {
-        "MP": 0.5,
-        "LH": 0.5,
-        "LN": 0.5,
-        "S": 0.5,
-        "B": 0.5,
-        "M": 0.5,
-    }
-
+    "MP": 1.0,
+    "LH": 1.0,
+    "LN": 1.0,
+    "S": 1.0,
+    "B": 1.0,
+    "M": 0.5,
+}
     meal_rows = []
 
     lh_df = milp_menu[milp_menu["category_code"] == "LH"].copy()
@@ -673,6 +792,48 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
             meal_rows.append(meal_row)
 
     return pd.DataFrame(meal_rows)
+def merge_same_food_in_same_meal(meal_df: pd.DataFrame) -> pd.DataFrame:
+    if meal_df.empty:
+        return meal_df
+
+    group_cols = [
+        "meal_time",
+        "food_name",
+        "category_code",
+        "urt_unit",
+        "gram_per_portion",
+        "urt_qty",
+    ]
+
+    sum_cols = [
+        "meal_portion",
+        "meal_gram",
+        "meal_urt_qty",
+        "energy_kcal",
+        "protein_g",
+        "fat_g",
+        "carb_g",
+        "sodium_mg",
+        "fiber_g",
+    ]
+
+    group_cols = [c for c in group_cols if c in meal_df.columns]
+    sum_cols = [c for c in sum_cols if c in meal_df.columns]
+
+    merged_df = (
+        meal_df
+        .groupby(group_cols, as_index=False)[sum_cols]
+        .sum()
+    )
+
+    if "meal_urt_qty" in merged_df.columns and "urt_unit" in merged_df.columns:
+        merged_df["meal_urt"] = (
+            merged_df["meal_urt_qty"].round(2).astype(str)
+            + " "
+            + merged_df["urt_unit"].astype(str)
+        )
+
+    return merged_df
 
 
 # ============================================================
@@ -782,7 +943,7 @@ def recommend_menu(request: MenuRequest):
     )
 
     meal_df = allocate_meals(milp_menu)
-
+    meal_df = merge_same_food_in_same_meal(meal_df)
     return format_response(
         request=request,
         milp_menu=milp_menu,
