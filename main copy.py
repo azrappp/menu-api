@@ -5,10 +5,11 @@ import pandas as pd
 import numpy as np
 import pulp
 
+
 app = FastAPI(
     title="MILP Menu Recommendation API",
     description="Menu recommendation using TKPI/URT data and MILP optimization",
-    version="1.0.0",
+    version="1.0.0"
 )
 
 
@@ -65,6 +66,7 @@ SUMMARY_COLS = [
 # ============================================================
 # REQUEST MODEL
 # ============================================================
+
 class MenuRequest(BaseModel):
     energy_kcal: int = Field(..., example=1600)
     diet_type: str = Field(default="DM_HT_OBESITY", example="DM_HT_OBESITY")
@@ -74,31 +76,35 @@ class MenuRequest(BaseModel):
     sodium_mg_max: float = Field(default=2000)
     fiber_g_min: float = Field(default=25)
 
+    # Weekly menu fields
     day_number: int | None = None
-    allowed_food_names: List[str] = Field(default_factory=list)
-    excluded_food_names: List[str] = Field(default_factory=list)
 
-    # New: weekly history
+    # Example:
+    # {"Ayam, daging, segar": 2, "Kembang tahu": 3}
     used_food_counts: Dict[str, int] = Field(default_factory=dict)
 
-    # New: weekly max repeat rules
-    weekly_rules: Dict[str, int] = Field(
-        default_factory=lambda: {
-            "LH": 3,
-            "LN": 4,
-            "S": 3,
-            "B": 3,
-            "MP": 7,
-            "SS": 7,
-            "M": 7,
-        }
-    )
+    # Example:
+    # {
+    #   "LH": {"Ayam, daging, segar": 2},
+    #   "LN": {"Kembang tahu": 3}
+    # }
+    category_used_food_counts: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+
+    # Weekly maximum repeat rules
+    weekly_rules: Dict[str, int] = Field(default_factory=lambda: {
+        "LH": 5,
+        "LN": 4,
+        "S": 3,
+        "B": 3,
+        "MP": 7,
+        "SS": 7,
+        "M": 7,
+    })
 
 
 # ============================================================
 # LOAD DATA ONCE
 # ============================================================
-
 
 def load_food_data() -> pd.DataFrame:
     df = pd.read_csv(FOOD_DATA_PATH)
@@ -119,7 +125,8 @@ def load_food_data() -> pd.DataFrame:
     ]
 
     df = df.drop(
-        columns=[c for c in old_result_cols if c in df.columns], errors="ignore"
+        columns=[c for c in old_result_cols if c in df.columns],
+        errors="ignore"
     )
 
     return df
@@ -131,7 +138,6 @@ FOOD_CANDIDATES = load_food_data()
 # ============================================================
 # CORE FUNCTIONS
 # ============================================================
-
 
 def filter_foods_for_disease(df: pd.DataFrame, diet_type: str) -> pd.DataFrame:
     filtered = df.copy()
@@ -148,31 +154,11 @@ def filter_foods_for_disease(df: pd.DataFrame, diet_type: str) -> pd.DataFrame:
     return filtered
 
 
-def filter_foods_by_weekly_candidates(
-    df: pd.DataFrame,
-    allowed_food_names: List[str],
-    excluded_food_names: List[str],
-) -> pd.DataFrame:
-    filtered = df.copy()
-
-    if allowed_food_names:
-        allowed_set = set(allowed_food_names)
-        filtered = filtered[filtered["food_name"].isin(allowed_set)]
-
-    if excluded_food_names:
-        excluded_set = set(excluded_food_names)
-        filtered = filtered[~filtered["food_name"].isin(excluded_set)]
-
-    return filtered
-
-
 def get_nearest_energy_level(energy_kcal: int) -> int:
     return min(PORTION_PLAN.keys(), key=lambda x: abs(x - energy_kcal))
 
 
-def adjust_portion_plan_for_disease(
-    base_plan: Dict[str, float], diet_type: str
-) -> Dict[str, float]:
+def adjust_portion_plan_for_disease(base_plan: Dict[str, float], diet_type: str) -> Dict[str, float]:
     plan = base_plan.copy()
 
     if "DM" in diet_type:
@@ -214,7 +200,6 @@ def get_disease_constraints(request: MenuRequest) -> Dict[str, Any]:
 
     return constraints
 
-
 def build_debug_info(
     milp_df: pd.DataFrame,
     adjusted_plan: Dict[str, float],
@@ -222,7 +207,12 @@ def build_debug_info(
     solver_status: str,
 ) -> Dict[str, Any]:
 
-    category_counts = milp_df.groupby("category_code").size().to_dict()
+    category_counts = (
+        milp_df
+        .groupby("category_code")
+        .size()
+        .to_dict()
+    )
 
     category_stats = []
 
@@ -230,42 +220,34 @@ def build_debug_info(
         cat_df = milp_df[milp_df["category_code"] == category].copy()
 
         if cat_df.empty:
-            category_stats.append(
-                {
-                    "category_code": category,
-                    "target_portion": target_portion,
-                    "available_foods": 0,
-                    "min_energy_per_portion": None,
-                    "max_energy_per_portion": None,
-                    "min_fat_per_portion": None,
-                    "max_fat_per_portion": None,
-                    "min_carb_per_portion": None,
-                    "max_carb_per_portion": None,
-                    "min_fiber_per_portion": None,
-                    "max_fiber_per_portion": None,
-                }
-            )
-            continue
-
-        category_stats.append(
-            {
+            category_stats.append({
                 "category_code": category,
                 "target_portion": target_portion,
-                "available_foods": int(len(cat_df)),
-                "min_energy_per_portion": float(
-                    cat_df["energy_kcal_per_portion"].min()
-                ),
-                "max_energy_per_portion": float(
-                    cat_df["energy_kcal_per_portion"].max()
-                ),
-                "min_fat_per_portion": float(cat_df["fat_g_per_portion"].min()),
-                "max_fat_per_portion": float(cat_df["fat_g_per_portion"].max()),
-                "min_carb_per_portion": float(cat_df["carb_g_per_portion"].min()),
-                "max_carb_per_portion": float(cat_df["carb_g_per_portion"].max()),
-                "min_fiber_per_portion": float(cat_df["fiber_g_per_portion"].min()),
-                "max_fiber_per_portion": float(cat_df["fiber_g_per_portion"].max()),
-            }
-        )
+                "available_foods": 0,
+                "min_energy_per_portion": None,
+                "max_energy_per_portion": None,
+                "min_fat_per_portion": None,
+                "max_fat_per_portion": None,
+                "min_carb_per_portion": None,
+                "max_carb_per_portion": None,
+                "min_fiber_per_portion": None,
+                "max_fiber_per_portion": None,
+            })
+            continue
+
+        category_stats.append({
+            "category_code": category,
+            "target_portion": target_portion,
+            "available_foods": int(len(cat_df)),
+            "min_energy_per_portion": float(cat_df["energy_kcal_per_portion"].min()),
+            "max_energy_per_portion": float(cat_df["energy_kcal_per_portion"].max()),
+            "min_fat_per_portion": float(cat_df["fat_g_per_portion"].min()),
+            "max_fat_per_portion": float(cat_df["fat_g_per_portion"].max()),
+            "min_carb_per_portion": float(cat_df["carb_g_per_portion"].min()),
+            "max_carb_per_portion": float(cat_df["carb_g_per_portion"].max()),
+            "min_fiber_per_portion": float(cat_df["fiber_g_per_portion"].min()),
+            "max_fiber_per_portion": float(cat_df["fiber_g_per_portion"].max()),
+        })
 
     return {
         "message": "MILP failed to find a feasible menu.",
@@ -275,7 +257,7 @@ def build_debug_info(
             "Fiber minimum may be too high for the available food candidates.",
             "Oil/fat portion may be too high if obesity adjustment is not applied.",
             "Fruit/LH/oil variety constraints may make the solution too restrictive.",
-            "Some required categories may have too few valid candidate foods.",
+            "Some required categories may have too few valid candidate foods."
         ],
         "constraints": constraints,
         "adjusted_portion_plan": adjusted_plan,
@@ -317,10 +299,9 @@ def prepare_milp_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             milp_df[col] = pd.to_numeric(milp_df[col], errors="coerce").fillna(0)
 
     return milp_df
-
-
 def get_max_portion_for_category(
-    category_code: str, adjusted_plan: Dict[str, float]
+    category_code: str,
+    adjusted_plan: Dict[str, float]
 ) -> float:
     category_code = str(category_code)
 
@@ -374,49 +355,60 @@ def solve_milp_menu(
         category_code = str(milp_df.loc[i, "category_code"])
 
         max_portion_for_food = get_max_portion_for_category(
-            category_code, adjusted_plan
+            category_code,
+            adjusted_plan
         )
 
         x[i] = pulp.LpVariable(
             f"x_{i}",
             lowBound=0,
             upBound=int(max_portion_for_food / PORTION_STEP),
-            cat="Integer",
+            cat="Integer"
         )
 
-    portion = {i: x[i] * PORTION_STEP for i in milp_df.index}
-
+    portion = {
+        i: x[i] * PORTION_STEP
+        for i in milp_df.index
+    }
     def get_max_x_for_index(i: int) -> int:
         category_code = str(milp_df.loc[i, "category_code"])
 
         max_portion_for_food = get_max_portion_for_category(
-            category_code, adjusted_plan
+        category_code,
+        adjusted_plan
         )
 
         return int(max_portion_for_food / PORTION_STEP)
 
+
     total_energy = pulp.lpSum(
-        portion[i] * milp_df.loc[i, "energy_kcal_per_portion"] for i in milp_df.index
+        portion[i] * milp_df.loc[i, "energy_kcal_per_portion"]
+        for i in milp_df.index
     )
 
     total_protein = pulp.lpSum(
-        portion[i] * milp_df.loc[i, "protein_g_per_portion"] for i in milp_df.index
+        portion[i] * milp_df.loc[i, "protein_g_per_portion"]
+        for i in milp_df.index
     )
 
     total_fat = pulp.lpSum(
-        portion[i] * milp_df.loc[i, "fat_g_per_portion"] for i in milp_df.index
+        portion[i] * milp_df.loc[i, "fat_g_per_portion"]
+        for i in milp_df.index
     )
 
     total_carb = pulp.lpSum(
-        portion[i] * milp_df.loc[i, "carb_g_per_portion"] for i in milp_df.index
+        portion[i] * milp_df.loc[i, "carb_g_per_portion"]
+        for i in milp_df.index
     )
 
     total_sodium = pulp.lpSum(
-        portion[i] * milp_df.loc[i, "sodium_mg_per_portion"] for i in milp_df.index
+        portion[i] * milp_df.loc[i, "sodium_mg_per_portion"]
+        for i in milp_df.index
     )
 
     total_fiber = pulp.lpSum(
-        portion[i] * milp_df.loc[i, "fiber_g_per_portion"] for i in milp_df.index
+        portion[i] * milp_df.loc[i, "fiber_g_per_portion"]
+        for i in milp_df.index
     )
     # --------------------------------------------------------
     # Portion structure
@@ -433,7 +425,7 @@ def solve_milp_menu(
         if len(category_indices) == 0 and target_portion > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"No candidate food for required category {category}",
+                detail=f"No candidate food for required category {category}"
             )
 
         if len(category_indices) == 0:
@@ -449,7 +441,7 @@ def solve_milp_menu(
 
             model += (
                 cat_total - target_portion == dev_pos - dev_neg,
-                f"soft_portion_{category}",
+                f"soft_portion_{category}"
             )
 
             portion_dev[category] = dev_pos + dev_neg
@@ -486,44 +478,43 @@ def solve_milp_menu(
     # --------------------------------------------------------
     # Variety constraints
     # --------------------------------------------------------
-
+    
     veg_indices = milp_df[milp_df["category_code"] == "S"].index.tolist()
-    veg_used = {i: pulp.LpVariable(f"veg_used_{i}", cat="Binary") for i in veg_indices}
+    veg_used = {
+    i: pulp.LpVariable(f"veg_used_{i}", cat="Binary")
+    for i in veg_indices
+    }
 
     for i in veg_indices:
         model += x[i] <= get_max_x_for_index(i) * veg_used[i]
 
     if veg_indices:
-        model += (
-            pulp.lpSum(veg_used[i] for i in veg_indices) <= 2,
-            "max_two_vegetable_types_per_day",
-        )
+            model += (pulp.lpSum(veg_used[i] for i in veg_indices) <= 2, "max_two_vegetable_types_per_day"
+    )
     # Max 1 MP type per day
     mp_indices = milp_df[milp_df["category_code"] == "MP"].index.tolist()
-    mp_used = {i: pulp.LpVariable(f"mp_used_{i}", cat="Binary") for i in mp_indices}
+    mp_used = {
+    i: pulp.LpVariable(f"mp_used_{i}", cat="Binary")
+    for i in mp_indices
+    }
 
     for i in mp_indices:
         model += x[i] <= get_max_x_for_index(i) * mp_used[i]
 
     if mp_indices:
         model += (
-            pulp.lpSum(mp_used[i] for i in mp_indices) <= 1,
-            "max_one_mp_type_per_day",
-        )
+        pulp.lpSum(mp_used[i] for i in mp_indices) <= 1,
+        "max_one_mp_type_per_day"
+    )
     # Max 1 fruit type per day
     fruit_indices = milp_df[milp_df["category_code"] == "B"].index.tolist()
-    fruit_used = {
-        i: pulp.LpVariable(f"fruit_used_{i}", cat="Binary") for i in fruit_indices
-    }
+    fruit_used = {i: pulp.LpVariable(f"fruit_used_{i}", cat="Binary") for i in fruit_indices}
 
     for i in fruit_indices:
         model += x[i] <= get_max_x_for_index(i) * fruit_used[i]
 
     if fruit_indices:
-        model += (
-            pulp.lpSum(fruit_used[i] for i in fruit_indices) <= 2,
-            "max_two_fruit_type_per_day",
-        )
+        model += pulp.lpSum(fruit_used[i] for i in fruit_indices) <= 2, "max_one_fruit_type_per_day"
 
     # Max 2 LH types per day
     lh_indices = milp_df[milp_df["category_code"] == "LH"].index.tolist()
@@ -533,14 +524,12 @@ def solve_milp_menu(
         model += x[i] <= get_max_x_for_index(i) * lh_used[i]
 
     if lh_indices:
-        model += (
-            pulp.lpSum(lh_used[i] for i in lh_indices) <= 2,
-            "max_two_lh_types_per_day",
-        )
+        model += pulp.lpSum(lh_used[i] for i in lh_indices) <= 2, "max_two_lh_types_per_day"
 
     # Max 1 oil type per day
     oil_indices = milp_df[milp_df["category_code"] == "M"].index.tolist()
     oil_used = {i: pulp.LpVariable(f"oil_used_{i}", cat="Binary") for i in oil_indices}
+
 
     for i in oil_indices:
         model += x[i] <= get_max_x_for_index(i) * oil_used[i]
@@ -554,38 +543,18 @@ def solve_milp_menu(
 
     model += (
         total_energy - energy_target == energy_dev_pos - energy_dev_neg,
-        "energy_deviation",
+        "energy_deviation"
     )
 
-    portion_penalty = pulp.lpSum(20 * portion_dev[cat] for cat in portion_dev)
-
-    used_food_counts = request.used_food_counts or {}
-    weekly_rules = request.weekly_rules or {}
-
-    repetition_penalty_terms = []
-
-    for i in milp_df.index:
-        food_name = str(milp_df.loc[i, "food_name"])
-        category_code = str(milp_df.loc[i, "category_code"])
-
-        repeat_count = used_food_counts.get(food_name, 0)
-        max_repeat = weekly_rules.get(category_code, 7)
-
-        # Basic penalty: repeated food becomes less attractive
-        penalty_weight = repeat_count * 50
-
-        # Strong penalty if the food already reaches weekly limit
-        if repeat_count >= max_repeat:
-            penalty_weight += 500
-        repetition_penalty_terms.append(penalty_weight * portion[i])
-
-    repetition_penalty = pulp.lpSum(repetition_penalty_terms)
+    portion_penalty = pulp.lpSum(
+        20 * portion_dev[cat]
+        for cat in portion_dev
+    )
 
     model += (
         10 * (energy_dev_pos + energy_dev_neg)
         + 0.01 * total_sodium
         + portion_penalty
-        + repetition_penalty
     ), "objective"
 
     solver = pulp.PULP_CBC_CMD(msg=False)
@@ -595,13 +564,16 @@ def solve_milp_menu(
 
     if status != "Optimal":
         debug_info = build_debug_info(
-            milp_df=milp_df,
-            adjusted_plan=adjusted_plan,
-            constraints=constraints,
-            solver_status=status,
+        milp_df=milp_df,
+        adjusted_plan=adjusted_plan,
+        constraints=constraints,
+        solver_status=status,
         )
 
-        raise HTTPException(status_code=422, detail=debug_info)
+        raise HTTPException(
+        status_code=422,
+        detail=debug_info
+        )
 
     selected_items = []
 
@@ -614,7 +586,8 @@ def solve_milp_menu(
 
     if not selected_items:
         raise HTTPException(
-            status_code=422, detail="MILP optimal but no food selected."
+            status_code=422,
+            detail="MILP optimal but no food selected."
         )
 
     milp_menu = pd.DataFrame(selected_items)
@@ -635,20 +608,25 @@ def solve_milp_menu(
 # MEAL ALLOCATION
 # ============================================================
 
-
-def split_preserve_total(
-    total_portion: float, ratios: Dict[str, float], step: float
-) -> Dict[str, float]:
+def split_preserve_total(total_portion: float, ratios: Dict[str, float], step: float) -> Dict[str, float]:
     meal_names = list(ratios.keys())
 
-    raw = {meal: total_portion * ratio for meal, ratio in ratios.items()}
+    raw = {
+        meal: total_portion * ratio
+        for meal, ratio in ratios.items()
+    }
 
-    rounded = {meal: np.floor(value / step) * step for meal, value in raw.items()}
+    rounded = {
+        meal: np.floor(value / step) * step
+        for meal, value in raw.items()
+    }
 
     remaining = round(total_portion - sum(rounded.values()), 10)
 
     remainders = sorted(
-        meal_names, key=lambda meal: raw[meal] - rounded[meal], reverse=True
+        meal_names,
+        key=lambda meal: raw[meal] - rounded[meal],
+        reverse=True
     )
 
     idx = 0
@@ -659,8 +637,6 @@ def split_preserve_total(
         idx += 1
 
     return rounded
-
-
 def assign_lh_items(lh_df: pd.DataFrame) -> List[pd.Series]:
     meal_rows = []
 
@@ -767,8 +743,6 @@ def assign_lh_items(lh_df: pd.DataFrame) -> List[pd.Series]:
         return meal_rows
 
     return meal_rows
-
-
 def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
     meal_rules = {
         "MP": {
@@ -793,20 +767,20 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
             "lunch": 0.5,
             "dinner": 0.5,
         },
-        "SS": {
-            "morning_snack": 1.0,
-        },
+         "SS": {
+        "morning_snack": 1.0,
+    },
     }
 
     step_size = {
-        "MP": 1.0,
-        "LH": 1.0,
-        "LN": 1.0,
-        "S": 1.0,
-        "B": 1.0,
-        "M": 0.5,
-        "SS": 1.0,
-    }
+    "MP": 1.0,
+    "LH": 1.0,
+    "LN": 1.0,
+    "S": 1.0,
+    "B": 1.0,
+    "M": 0.5,
+    "SS": 1.0,
+}
     meal_rows = []
 
     lh_df = milp_menu[milp_menu["category_code"] == "LH"].copy()
@@ -848,8 +822,6 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
             meal_rows.append(meal_row)
 
     return pd.DataFrame(meal_rows)
-
-
 def merge_same_food_in_same_meal(meal_df: pd.DataFrame) -> pd.DataFrame:
     if meal_df.empty:
         return meal_df
@@ -878,7 +850,11 @@ def merge_same_food_in_same_meal(meal_df: pd.DataFrame) -> pd.DataFrame:
     group_cols = [c for c in group_cols if c in meal_df.columns]
     sum_cols = [c for c in sum_cols if c in meal_df.columns]
 
-    merged_df = meal_df.groupby(group_cols, as_index=False)[sum_cols].sum()
+    merged_df = (
+        meal_df
+        .groupby(group_cols, as_index=False)[sum_cols]
+        .sum()
+    )
 
     if "meal_urt_qty" in merged_df.columns and "urt_unit" in merged_df.columns:
         merged_df["meal_urt"] = (
@@ -893,7 +869,6 @@ def merge_same_food_in_same_meal(meal_df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 # RESPONSE FORMATTER
 # ============================================================
-
 
 def format_response(
     request: MenuRequest,
@@ -923,31 +898,26 @@ def format_response(
         items = []
 
         for _, row in meal_items_df.iterrows():
-            items.append(
-                {
-                    "food_name": row["food_name"],
-                    "category_code": row["category_code"],
-                    "portion": float(row["meal_portion"]),
-                    "urt": row["meal_urt"],
-                    "gram": round(float(row["meal_gram"]), 2),
-                    "energy_kcal": round(float(row["energy_kcal"]), 2),
-                    "protein_g": round(float(row["protein_g"]), 2),
-                    "fat_g": round(float(row["fat_g"]), 2),
-                    "carb_g": round(float(row["carb_g"]), 2),
-                    "sodium_mg": round(float(row["sodium_mg"]), 2),
-                    "fiber_g": round(float(row["fiber_g"]), 2),
-                }
-            )
+            items.append({
+                "food_name": row["food_name"],
+                "category_code": row["category_code"],
+                "portion": float(row["meal_portion"]),
+                "urt": row["meal_urt"],
+                "gram": round(float(row["meal_gram"]), 2),
+                "energy_kcal": round(float(row["energy_kcal"]), 2),
+                "protein_g": round(float(row["protein_g"]), 2),
+                "fat_g": round(float(row["fat_g"]), 2),
+                "carb_g": round(float(row["carb_g"]), 2),
+                "fiber_g": round(float(row["fiber_g"]), 2),
+            })
 
         meal_summary = meal_items_df[SUMMARY_COLS].sum().round(2).to_dict()
 
-        meals.append(
-            {
-                "meal_time": meal_time,
-                "summary": meal_summary,
-                "items": items,
-            }
-        )
+        meals.append({
+            "meal_time": meal_time,
+            "summary": meal_summary,
+            "items": items,
+        })
 
     return {
         "status": "success",
@@ -971,10 +941,11 @@ def format_response(
 # API ENDPOINT
 # ============================================================
 
-
 @app.get("/")
 def root():
-    return {"message": "MILP Menu Recommendation API is running."}
+    return {
+        "message": "MILP Menu Recommendation API is running."
+    }
 
 
 @app.post("/recommend-menu")
@@ -984,26 +955,10 @@ def recommend_menu(request: MenuRequest):
         request.diet_type,
     )
 
-    candidate_for_patient = filter_foods_by_weekly_candidates(
-        candidate_for_patient,
-        allowed_food_names=request.allowed_food_names,
-        excluded_food_names=request.excluded_food_names,
-    )
-
     milp_df = prepare_milp_dataframe(candidate_for_patient)
 
-    if milp_df.empty:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "No valid food candidates after applying allowed/excluded food filters.",
-                "allowed_food_names_count": len(request.allowed_food_names),
-                "excluded_food_names_count": len(request.excluded_food_names),
-            },
-        )
     nearest_energy = get_nearest_energy_level(request.energy_kcal)
     base_plan = PORTION_PLAN[nearest_energy]
-
     adjusted_plan = adjust_portion_plan_for_disease(
         base_plan,
         request.diet_type,
@@ -1015,12 +970,10 @@ def recommend_menu(request: MenuRequest):
         milp_df=milp_df,
         adjusted_plan=adjusted_plan,
         constraints=constraints,
-        request=request,
     )
 
     meal_df = allocate_meals(milp_menu)
     meal_df = merge_same_food_in_same_meal(meal_df)
-
     return format_response(
         request=request,
         milp_menu=milp_menu,
