@@ -196,21 +196,28 @@ def adjust_portion_plan_for_disease(
 def get_disease_constraints(request: MenuRequest) -> Dict[str, Any]:
     constraints = {
         "energy_target": request.energy_kcal,
-        "carb_min_g": None,
-        "carb_max_g": None,
-        "fat_min_g": None,
-        "fat_max_g": None,
+        # Always constrain macros for all users
+        "carb_min_g": request.carb_g * 0.90,
+        "carb_max_g": request.carb_g * 1.10,
+        "protein_min_g": request.protein_g * 0.90,
+        "protein_max_g": request.protein_g * 1.20,
+        "fat_min_g": request.fat_g * 0.80,
+        "fat_max_g": request.fat_g * 1.20,
         "sodium_max_mg": None,
         "fiber_min_g": None,
     }
 
-    if request.diet_type == "DM_HT_OBESITY":
-        constraints["carb_min_g"] = request.carb_g * 0.90
-        constraints["carb_max_g"] = request.carb_g * 1.10
-        constraints["fat_min_g"] = request.fat_g * 0.80
-        constraints["fat_max_g"] = request.fat_g * 1.10
-        constraints["fiber_min_g"] = request.fiber_g_min
+    # Hypertension: sodium must be limited
+    if "HT" in request.diet_type:
         constraints["sodium_max_mg"] = request.sodium_mg_max
+
+    # Diabetes: fiber target is important
+    if "DM" in request.diet_type:
+        constraints["fiber_min_g"] = request.fiber_g_min
+
+    # Obesity: make fat upper bound stricter
+    if "OBESITY" in request.diet_type:
+        constraints["fat_max_g"] = request.fat_g * 1.05
 
     return constraints
 
@@ -424,7 +431,7 @@ def solve_milp_menu(
     # Soft: others
     # --------------------------------------------------------
 
-    hard_categories = ["M", "G", "SS"]
+    hard_categories = ["M", "SS"]
     portion_dev = {}
 
     for category, target_portion in adjusted_plan.items():
@@ -459,8 +466,8 @@ def solve_milp_menu(
     # --------------------------------------------------------
 
     energy_target = constraints["energy_target"]
-    energy_min = energy_target * 0.90
-    energy_max = energy_target * 1.10
+    energy_min = energy_target * 0.95
+    energy_max = energy_target * 1.05
 
     model += total_energy >= energy_min, "energy_min"
     model += total_energy <= energy_max, "energy_max"
@@ -471,6 +478,11 @@ def solve_milp_menu(
     if constraints.get("carb_max_g") is not None:
         model += total_carb <= constraints["carb_max_g"], "carb_max"
 
+    if constraints.get("protein_min_g") is not None:
+        model += total_protein >= constraints["protein_min_g"], "protein_min"
+
+    if constraints.get("protein_max_g") is not None:
+        model += total_protein <= constraints["protein_max_g"], "protein_max"
     if constraints.get("fat_min_g") is not None:
         model += total_fat >= constraints["fat_min_g"], "fat_min"
 
@@ -545,6 +557,11 @@ def solve_milp_menu(
     for i in oil_indices:
         model += x[i] <= get_max_x_for_index(i) * oil_used[i]
 
+    if oil_indices:
+        model += (
+            pulp.lpSum(oil_used[i] for i in oil_indices) <= 1,
+            "max_one_oil_type_per_day",
+        )
     # --------------------------------------------------------
     # Objective
     # --------------------------------------------------------
@@ -556,36 +573,39 @@ def solve_milp_menu(
         total_energy - energy_target == energy_dev_pos - energy_dev_neg,
         "energy_deviation",
     )
+    protein_dev_pos = pulp.LpVariable("protein_dev_pos", lowBound=0)
+    protein_dev_neg = pulp.LpVariable("protein_dev_neg", lowBound=0)
+
+    fat_dev_pos = pulp.LpVariable("fat_dev_pos", lowBound=0)
+    fat_dev_neg = pulp.LpVariable("fat_dev_neg", lowBound=0)
+
+    carb_dev_pos = pulp.LpVariable("carb_dev_pos", lowBound=0)
+    carb_dev_neg = pulp.LpVariable("carb_dev_neg", lowBound=0)
+
+    model += (
+        total_protein - request.protein_g == protein_dev_pos - protein_dev_neg,
+        "protein_deviation",
+    )
+
+    model += (
+        total_fat - request.fat_g == fat_dev_pos - fat_dev_neg,
+        "fat_deviation",
+    )
+
+    model += (
+        total_carb - request.carb_g == carb_dev_pos - carb_dev_neg,
+        "carb_deviation",
+    )
 
     portion_penalty = pulp.lpSum(20 * portion_dev[cat] for cat in portion_dev)
 
-    used_food_counts = request.used_food_counts or {}
-    weekly_rules = request.weekly_rules or {}
-
-    repetition_penalty_terms = []
-
-    for i in milp_df.index:
-        food_name = str(milp_df.loc[i, "food_name"])
-        category_code = str(milp_df.loc[i, "category_code"])
-
-        repeat_count = used_food_counts.get(food_name, 0)
-        max_repeat = weekly_rules.get(category_code, 7)
-
-        # Basic penalty: repeated food becomes less attractive
-        penalty_weight = repeat_count * 50
-
-        # Strong penalty if the food already reaches weekly limit
-        if repeat_count >= max_repeat:
-            penalty_weight += 500
-        repetition_penalty_terms.append(penalty_weight * portion[i])
-
-    repetition_penalty = pulp.lpSum(repetition_penalty_terms)
-
     model += (
         10 * (energy_dev_pos + energy_dev_neg)
+        + 5 * (protein_dev_pos + protein_dev_neg)
+        + 3 * (carb_dev_pos + carb_dev_neg)
+        + 5 * (fat_dev_pos + fat_dev_neg)
         + 0.01 * total_sodium
         + portion_penalty
-        + repetition_penalty
     ), "objective"
 
     solver = pulp.PULP_CBC_CMD(msg=False)
@@ -796,6 +816,9 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
         "SS": {
             "morning_snack": 1.0,
         },
+        "G": {
+            "afternoon_snack": 1.0,
+        },
     }
 
     step_size = {
@@ -806,6 +829,7 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
         "B": 1.0,
         "M": 0.5,
         "SS": 1.0,
+        "G": 1.0,
     }
     meal_rows = []
 
@@ -1008,6 +1032,10 @@ def recommend_menu(request: MenuRequest):
         base_plan,
         request.diet_type,
     )
+
+    for category in list(adjusted_plan.keys()):
+        if category not in milp_df["category_code"].unique():
+            adjusted_plan[category] = 0
 
     constraints = get_disease_constraints(request)
 
