@@ -804,6 +804,11 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
             "lunch": 0.3,
             "dinner": 0.3,
         },
+        "LH": {
+            "breakfast": 0.33,
+            "lunch": 0.34,
+            "dinner": 0.33,
+        },
         "LN": {
             "breakfast": 0.3,
             "lunch": 0.3,
@@ -839,14 +844,10 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
         "SS": 0.5,
         "G": 0.5,
     }
+
     meal_rows = []
 
-    lh_df = milp_menu[milp_menu["category_code"] == "LH"].copy()
-    meal_rows.extend(assign_lh_items(lh_df))
-
-    other_menu = milp_menu[milp_menu["category_code"] != "LH"].copy()
-
-    for _, row in other_menu.iterrows():
+    for _, row in milp_menu.iterrows():
         category = row["category_code"]
 
         if category not in meal_rules:
@@ -856,7 +857,7 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
         step = step_size[category]
 
         meal_portions = split_preserve_total(
-            total_portion=row["selected_portions"],
+            total_portion=float(row["selected_portions"]),
             ratios=rules,
             step=step,
         )
