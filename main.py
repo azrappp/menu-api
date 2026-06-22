@@ -830,14 +830,14 @@ def allocate_meals(milp_menu: pd.DataFrame) -> pd.DataFrame:
     }
 
     step_size = {
-        "MP": 1.0,
-        "LH": 1.0,
-        "LN": 1.0,
-        "S": 1.0,
-        "B": 1.0,
+        "MP": 0.5,
+        "LH": 0.5,
+        "LN": 0.5,
+        "S": 0.5,
+        "B": 0.5,
         "M": 0.5,
-        "SS": 1.0,
-        "G": 1.0,
+        "SS": 0.5,
+        "G": 0.5,
     }
     meal_rows = []
 
@@ -926,6 +926,16 @@ def merge_same_food_in_same_meal(meal_df: pd.DataFrame) -> pd.DataFrame:
 # RESPONSE FORMATTER
 # ============================================================
 
+def calculate_daily_total_from_milp(milp_menu: pd.DataFrame) -> Dict[str, float]:
+    return {
+        "energy_kcal": round(float(milp_menu["energy_kcal_selected_total"].sum()), 2),
+        "protein_g": round(float(milp_menu["protein_g_selected_total"].sum()), 2),
+        "fat_g": round(float(milp_menu["fat_g_selected_total"].sum()), 2),
+        "carb_g": round(float(milp_menu["carb_g_selected_total"].sum()), 2),
+        "sodium_mg": round(float(milp_menu["sodium_mg_selected_total"].sum()), 2),
+        "fiber_g": round(float(milp_menu["fiber_g_selected_total"].sum()), 2),
+    }
+
 
 def format_response(
     request: MenuRequest,
@@ -934,8 +944,7 @@ def format_response(
     adjusted_plan: Dict[str, float],
 ) -> Dict[str, Any]:
 
-    daily_total = meal_df[SUMMARY_COLS].sum().round(2).to_dict()
-
+    daily_total = calculate_daily_total_from_milp(milp_menu)
     meal_order = [
         "breakfast",
         "morning_snack",
@@ -1056,7 +1065,19 @@ def recommend_menu(request: MenuRequest):
 
     meal_df = allocate_meals(milp_menu)
     meal_df = merge_same_food_in_same_meal(meal_df)
+    milp_energy = milp_menu["energy_kcal_selected_total"].sum()
+    meal_energy = meal_df["energy_kcal"].sum()
 
+    if abs(milp_energy - meal_energy) > 1:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Meal allocation lost some selected portions.",
+                "milp_energy": round(float(milp_energy), 2),
+                "meal_energy": round(float(meal_energy), 2),
+                "difference": round(float(milp_energy - meal_energy), 2),
+            },
+        )
     return format_response(
         request=request,
         milp_menu=milp_menu,
