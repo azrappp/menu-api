@@ -217,7 +217,7 @@ def get_disease_constraints(request: MenuRequest) -> Dict[str, Any]:
 
     # Obesity: make fat upper bound stricter
     if "OBESITY" in request.diet_type:
-        constraints["fat_max_g"] = request.fat_g * 1.05
+        constraints["fat_max_g"] = request.fat_g * 1.20
 
     return constraints
 
@@ -321,7 +321,8 @@ def prepare_milp_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in numeric_cols:
         if col in milp_df.columns:
-            milp_df[col] = pd.to_numeric(milp_df[col], errors="coerce").fillna(0)
+            milp_df[col] = pd.to_numeric(
+                milp_df[col], errors="coerce").fillna(0)
 
     return milp_df
 
@@ -431,11 +432,12 @@ def solve_milp_menu(
     # Soft: others
     # --------------------------------------------------------
 
-    hard_categories = ["M", "SS"]
+    hard_categories = []
     portion_dev = {}
 
     for category, target_portion in adjusted_plan.items():
-        category_indices = milp_df[milp_df["category_code"] == category].index.tolist()
+        category_indices = milp_df[milp_df["category_code"]
+                                   == category].index.tolist()
 
         if len(category_indices) == 0 and target_portion > 0:
             raise HTTPException(
@@ -500,7 +502,8 @@ def solve_milp_menu(
     # --------------------------------------------------------
 
     veg_indices = milp_df[milp_df["category_code"] == "S"].index.tolist()
-    veg_used = {i: pulp.LpVariable(f"veg_used_{i}", cat="Binary") for i in veg_indices}
+    veg_used = {i: pulp.LpVariable(
+        f"veg_used_{i}", cat="Binary") for i in veg_indices}
 
     for i in veg_indices:
         model += x[i] <= get_max_x_for_index(i) * veg_used[i]
@@ -512,7 +515,8 @@ def solve_milp_menu(
         )
     # Max 1 MP type per day
     mp_indices = milp_df[milp_df["category_code"] == "MP"].index.tolist()
-    mp_used = {i: pulp.LpVariable(f"mp_used_{i}", cat="Binary") for i in mp_indices}
+    mp_used = {i: pulp.LpVariable(f"mp_used_{i}", cat="Binary")
+               for i in mp_indices}
 
     for i in mp_indices:
         model += x[i] <= get_max_x_for_index(i) * mp_used[i]
@@ -539,7 +543,8 @@ def solve_milp_menu(
 
     # Max 2 LH types per day
     lh_indices = milp_df[milp_df["category_code"] == "LH"].index.tolist()
-    lh_used = {i: pulp.LpVariable(f"lh_used_{i}", cat="Binary") for i in lh_indices}
+    lh_used = {i: pulp.LpVariable(f"lh_used_{i}", cat="Binary")
+               for i in lh_indices}
 
     for i in lh_indices:
         model += x[i] <= get_max_x_for_index(i) * lh_used[i]
@@ -552,7 +557,8 @@ def solve_milp_menu(
 
     # Max 1 oil type per day
     oil_indices = milp_df[milp_df["category_code"] == "M"].index.tolist()
-    oil_used = {i: pulp.LpVariable(f"oil_used_{i}", cat="Binary") for i in oil_indices}
+    oil_used = {i: pulp.LpVariable(
+        f"oil_used_{i}", cat="Binary") for i in oil_indices}
 
     for i in oil_indices:
         model += x[i] <= get_max_x_for_index(i) * oil_used[i]
@@ -642,7 +648,8 @@ def solve_milp_menu(
     for col in NUTRIENT_COLS:
         if col in milp_menu.columns:
             total_col = col.replace("_per_portion", "_selected_total")
-            milp_menu[total_col] = milp_menu[col] * milp_menu["selected_portions"]
+            milp_menu[total_col] = milp_menu[col] * \
+                milp_menu["selected_portions"]
 
     milp_menu["selected_gram"] = (
         milp_menu["gram_per_portion"] * milp_menu["selected_portions"]
@@ -663,7 +670,8 @@ def split_preserve_total(
 
     raw = {meal: total_portion * ratio for meal, ratio in ratios.items()}
 
-    rounded = {meal: np.floor(value / step) * step for meal, value in raw.items()}
+    rounded = {meal: np.floor(value / step) *
+               step for meal, value in raw.items()}
 
     remaining = round(total_portion - sum(rounded.values()), 10)
 
