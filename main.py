@@ -605,6 +605,15 @@ def solve_milp_menu(
 
     portion_penalty = pulp.lpSum(20 * portion_dev[cat] for cat in portion_dev)
 
+    dm_quality_penalty = 0
+
+    if "DM" in request.diet_type:
+        dm_quality_penalty = pulp.lpSum(
+            20 * portion[i]
+            for i in milp_df.index
+            if is_white_rice(milp_df.loc[i])
+        )
+
     model += (
         10 * (energy_dev_pos + energy_dev_neg)
         + 5 * (protein_dev_pos + protein_dev_neg)
@@ -612,6 +621,7 @@ def solve_milp_menu(
         + 5 * (fat_dev_pos + fat_dev_neg)
         + 0.01 * total_sodium
         + portion_penalty
+        + dm_quality_penalty
     ), "objective"
 
     solver = pulp.PULP_CBC_CMD(msg=False)
@@ -1035,6 +1045,7 @@ def recommend_menu(request: MenuRequest):
         excluded_food_names=request.excluded_food_names,
     )
 
+    candidate_for_patient = keep_only_rice_as_mp(candidate_for_patient)
     milp_df = prepare_milp_dataframe(candidate_for_patient)
 
     if milp_df.empty:
@@ -1087,4 +1098,44 @@ def recommend_menu(request: MenuRequest):
         milp_menu=milp_menu,
         meal_df=meal_df,
         adjusted_plan=adjusted_plan,
+    )
+
+
+def keep_only_rice_as_mp(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    allowed_mp_names = {
+        "nasi",
+        "nasi beras merah",
+        "nasi merah",
+    }
+
+    def keep_row(row) -> bool:
+        category = str(row.get("category_code", "")).upper().strip()
+
+        if category != "MP":
+            return True
+
+        food_name = str(row.get("food_name", "")).lower().strip()
+        food_name_clean = str(row.get("food_name_clean", "")).lower().strip()
+        food_name_std = str(row.get("food_name_std", "")).lower().strip()
+
+        return (
+            food_name in allowed_mp_names
+            or food_name_clean in allowed_mp_names
+            or food_name_std in allowed_mp_names
+        )
+
+    return df[df.apply(keep_row, axis=1)].copy()
+
+
+def is_white_rice(row) -> bool:
+    food_name = str(row.get("food_name", "")).lower().strip()
+    food_name_clean = str(row.get("food_name_clean", "")).lower().strip()
+    food_name_std = str(row.get("food_name_std", "")).lower().strip()
+
+    return (
+        food_name == "nasi"
+        or food_name_clean == "nasi"
+        or food_name_std == "nasi"
     )
